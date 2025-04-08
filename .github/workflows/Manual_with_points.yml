@@ -1,0 +1,166 @@
+name: Update Points and Merge PRs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  merge-and-update:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        persist-credentials: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: pip install PyGithub python-dateutil
+
+    - name: Merge PRs and update points
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        import json
+        import os
+        import sys
+        import time
+        from github import Github
+        from datetime import datetime, timezone
+        from dateutil import parser
+
+        # Debugging info
+        print("Python version:", sys.version)
+        print("Current directory:", os.getcwd())
+        print("Repository contents:", os.listdir('.'))
+
+        # Load points data
+        try:
+            with open('points.json', 'r') as f:
+                data = json.load(f)
+            print("Current data loaded successfully")
+        except Exception as e:
+            print(f"Error loading JSON file: {str(e)}")
+            sys.exit(1)
+
+        # Initialize GitHub client
+        try:
+            g = Github(os.getenv('GITHUB_TOKEN'))
+            repo = g.get_repo(os.getenv('GITHUB_REPOSITORY'))
+            print(f"Connected to {repo.full_name}")
+        except Exception as e:
+            print(f"Error connecting to GitHub: {str(e)}")
+            sys.exit(1)
+
+        # Sync with remote
+        os.system('git config --global user.name "GitHub Actions"')
+        os.system('git config --global user.email "actions@github.com"')
+        os.system('git pull --rebase origin main')
+
+        # Track points
+        today = datetime.now(timezone.utc).date()
+        merged_users = set()
+
+        # Check existing points today
+        for username in data.get('users', {}):
+            if 'last_points_date' in data['users'][username]:
+                last_date = parser.parse(data['users'][username]['last_points_date']).date()
+                if last_date == today:
+                    print(f"User {username} already got points today")
+
+        # Process PRs with retry for mergeability
+        open_prs = list(repo.get_pulls(state='open'))
+        print(f"Found {len(open_prs)} open PRs")
+
+        for pr in open_prs:
+            username = pr.user.login
+            print(f"\nProcessing PR #{pr.number} from {username}")
+
+            # Check if user already got points today
+            user_data = data['users'].get(username, {})
+            if 'last_points_date' in user_data:
+                last_date = parser.parse(user_data['last_points_date']).date()
+                if last_date == today:
+                    print(f"Skipping {username} - already received points today")
+                    continue
+
+            # Handle mergeability with retries
+            max_merge_retries = 3
+            merged = False
+            
+            for attempt in range(max_merge_retries):
+                try:
+                    # Refresh PR data
+                    pr = repo.get_pull(pr.number)
+                    
+                    if pr.merged:
+                        print(f"PR #{pr.number} already merged")
+                        merged = True
+                        break
+                        
+                    if pr.mergeable:
+                        print(f"Attempting to merge PR #{pr.number} (attempt {attempt + 1})")
+                        pr.merge(merge_method='merge')
+                        merged = True
+                        print(f"Successfully merged PR #{pr.number}")
+                        break
+                    else:
+                        print(f"PR #{pr.number} not mergeable (state: {pr.mergeable_state})")
+                        if pr.mergeable_state == "unknown":
+                            print("Waiting 5 seconds for GitHub to calculate mergeability...")
+                            time.sleep(5)
+                            continue
+                        break
+                except Exception as e:
+                    print(f"Merge attempt {attempt + 1} failed: {str(e)}")
+                    time.sleep(5)
+
+            if merged:
+                merged_users.add(username)
+
+        # Update points if any PRs were merged
+        if merged_users:
+            current_date = datetime.now(timezone.utc).isoformat()
+            print(f"\nUpdating points for {len(merged_users)} users")
+            
+            for username in merged_users:
+                if username in data['users']:
+                    data['users'][username]['points'] += 3
+                    data['users'][username]['last_points_date'] = current_date
+                    print(f"Added 3 points to {username} (Total: {data['users'][username]['points']})")
+                else:
+                    data['users'][username] = {
+                        "points": 3,
+                        "social_media_points": 0,
+                        "last_points_date": current_date
+                    }
+                    print(f"Created new entry for {username}")
+
+            # Save and push changes
+            with open('points.json', 'w') as f:
+                json.dump(data, f, indent=2)
+
+            os.system('git add points.json')
+            os.system('git commit -m "Automated points update for merged PRs"')
+            
+            # Push with retries
+            max_push_retries = 3
+            for attempt in range(max_push_retries):
+                print(f"Push attempt {attempt + 1}/{max_push_retries}")
+                if os.system('git pull --rebase origin main && git push origin main') == 0:
+                    print("Push successful")
+                    break
+                print("Push failed, retrying...")
+                time.sleep(5)
+            else:
+                print("Failed to push after multiple attempts")
+                sys.exit(1)
+        else:
+            print("No PRs were merged - no points to update")
+      shell: python

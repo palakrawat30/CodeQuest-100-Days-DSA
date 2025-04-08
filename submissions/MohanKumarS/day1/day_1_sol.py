@@ -1,0 +1,1 @@
+print("Hello, World!") # print - userdefined function -> It helps us to print the statement inside the double quotes

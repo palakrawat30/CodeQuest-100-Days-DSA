@@ -1,0 +1,4 @@
+print("Hello, World")
+- here the print() is a user defined function
+- the statement "Hello, World" is printed at the output
+- whatever, we give inside the double quotes in print() it printed at the output 
